@@ -1,6 +1,7 @@
 use indexmap::IndexMap;
 
 pub(in crate::docstring) mod google;
+mod numpy;
 pub(super) mod preformatted;
 pub(super) mod rst;
 /// Syntax utilities shared by docstring format parsers and renderers.
@@ -41,16 +42,14 @@ impl SectionKind {
 }
 
 /// Returns docs for all parameters recognized in the given docstring.
-pub(super) fn parameter_documentation(
-    raw: &str,
-    numpy_parameters: IndexMap<String, String>,
-) -> IndexMap<String, String> {
+pub(super) fn parameter_documentation(raw: &str) -> IndexMap<String, String> {
+    let normalized = super::documentation_trim(raw);
     // Parse Google sections from raw text so PEP 257 trimming does not erase item indentation and
     // make capitalized parameter names look like sibling sections. This means that, for example,
     // raw `Note:\n        context\n\n    Args:\n        value: docs` treats `Args` as part of
     // `Note`, while PEP 257 normalization aligns the two headings.
     let mut parameters = google::parameter_documentation(raw);
-    parameters.extend(numpy_parameters);
+    parameters.extend(numpy::parameter_documentation(&normalized));
     parameters.extend(rst::parameter_documentation(raw));
     parameters
 }
