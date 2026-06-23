@@ -295,7 +295,7 @@ pub fn will_rename_paths(
 /// The moved files are always included so that their relative imports can be updated. Filtering
 /// consumers before analysis prevents an unsupported reference outside the caller's ownership
 /// boundary from cancelling otherwise safe edits inside it.
-fn will_rename_paths_in_files(
+pub fn will_rename_paths_in_files(
     db: &dyn Db,
     renames: &[PathRename],
     files: impl IntoIterator<Item = File>,

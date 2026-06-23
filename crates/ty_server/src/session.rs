@@ -1145,13 +1145,26 @@ impl Session {
 
     /// Creates a snapshot of the current state of the [`Session`].
     pub(crate) fn snapshot_session(&self) -> SessionSnapshot {
+        let (project_contexts, projects) = self
+            .projects
+            .iter()
+            .map(|(workspace_root, project)| {
+                let settings = self
+                    .workspaces
+                    .settings_for_path(workspace_root)
+                    .or_else(|| self.workspaces.settings_virtual_fallback())
+                    .unwrap_or_default();
+                (
+                    ProjectSnapshotContext {
+                        workspace_root: workspace_root.clone(),
+                        settings,
+                    },
+                    project.db.clone(),
+                )
+            })
+            .unzip();
+
         SessionSnapshot {
-            projects: self
-                .projects
-                .values()
-                .map(|project| &project.db)
-                .cloned()
-                .collect(),
             index: self.index.clone().unwrap(),
             global_settings: self.global_settings.clone(),
             position_encoding: self.position_encoding,
@@ -1159,6 +1172,8 @@ impl Session {
             resolved_client_capabilities: self.resolved_client_capabilities,
             revision: self.revision,
             client_name: self.client_name,
+            project_contexts,
+            projects,
         }
     }
 
@@ -1428,6 +1443,11 @@ impl DocumentSnapshot {
     }
 }
 
+struct ProjectSnapshotContext {
+    workspace_root: SystemPathBuf,
+    settings: Arc<WorkspaceSettings>,
+}
+
 /// An immutable snapshot of the current state of [`Session`].
 pub(crate) struct SessionSnapshot {
     index: Arc<Index>,
@@ -1437,6 +1457,7 @@ pub(crate) struct SessionSnapshot {
     in_test: bool,
     revision: u64,
     client_name: ClientName,
+    project_contexts: Vec<ProjectSnapshotContext>,
 
     /// IMPORTANT: It's important that the databases come last, or at least,
     /// after any `Arc` that we try to extract or mutate in-place using `Arc::into_inner`
@@ -1453,6 +1474,29 @@ pub(crate) struct SessionSnapshot {
 impl SessionSnapshot {
     pub(crate) fn projects(&self) -> &[ProjectDatabase] {
         &self.projects
+    }
+
+    /// Returns the project owned by the closest enclosing workspace, falling back to the first.
+    pub(crate) fn project_index_for_path(&self, path: &SystemPath) -> Option<usize> {
+        self.enclosing_project_index_for_path(path)
+            .or_else(|| (!self.projects.is_empty()).then_some(0))
+    }
+
+    /// Returns the project owned by the closest enclosing workspace, without a fallback.
+    pub(crate) fn enclosing_project_index_for_path(&self, path: &SystemPath) -> Option<usize> {
+        self.project_contexts
+            .iter()
+            .enumerate()
+            .filter(|(_, context)| path.starts_with(&context.workspace_root))
+            .max_by_key(|(_, context)| context.workspace_root.as_str().len())
+            .map(|(index, _)| index)
+    }
+
+    /// Returns the workspace settings associated with `project_index`.
+    pub(crate) fn workspace_settings(&self, project_index: usize) -> Option<&WorkspaceSettings> {
+        self.project_contexts
+            .get(project_index)
+            .map(|context| context.settings.as_ref())
     }
 
     pub(crate) fn index(&self) -> &Index {
