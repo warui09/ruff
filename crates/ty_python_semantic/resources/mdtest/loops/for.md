@@ -582,6 +582,11 @@ for x in Test():
 When we have an intersection type via `isinstance` narrowing, we should be able to infer the
 iterable element type precisely:
 
+```toml
+[semantics]
+isinstance-narrowing = "strict"
+```
+
 ```py
 from typing import Sequence
 
@@ -1456,6 +1461,9 @@ iteration.
 ```toml
 [environment]
 python-version = "3.12"
+
+[semantics]
+isinstance-narrowing = "strict"
 ```
 
 ### TypeVar bound with non-iterable elements
