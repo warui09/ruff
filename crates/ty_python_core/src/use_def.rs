@@ -759,6 +759,10 @@ pub struct UseDefMap<'db> {
         DefinitionsAtDefinition<InternedBindingsId, InternedDeclarationsId>,
     >,
 
+    /// Default prior state for definitions omitted from `definitions_by_definition`.
+    initial_definitions_at_definition:
+        DefinitionsAtDefinition<InternedBindingsId, InternedDeclarationsId>,
+
     /// Retained [`PlaceState`] values for each symbol.
     symbol_states: FrozenIndexVec<ScopedSymbolId, RetainedPlaceStates<InternedPlaceStateId>>,
 
@@ -1042,7 +1046,11 @@ impl<'db> UseDefMap<'db> {
         &self,
         definition: Definition<'db>,
     ) -> BindingWithConstraintsIterator<'_, 'db> {
-        let bindings_id = self.definitions_by_definition[&definition].bindings;
+        let bindings_id = self
+            .definitions_by_definition
+            .get(&definition)
+            .unwrap_or(&self.initial_definitions_at_definition)
+            .bindings;
         self.bindings_iterator(
             &self.interned_bindings[bindings_id],
             BoundnessAnalysis::BasedOnUnboundVisibility,
@@ -1053,7 +1061,10 @@ impl<'db> UseDefMap<'db> {
         &self,
         binding: Definition<'db>,
     ) -> DeclarationsIterator<'_, 'db> {
-        let declarations_id = self.definitions_by_definition[&binding]
+        let declarations_id = self
+            .definitions_by_definition
+            .get(&binding)
+            .unwrap_or(&self.initial_definitions_at_definition)
             .declarations
             .expect("binding definition should have retained declarations");
         self.declarations_iterator(
@@ -2527,9 +2538,16 @@ impl<'db> UseDefMapBuilder<'db> {
             interned_ids_by_declarations_capacity,
             interned_declarations_capacity,
         );
+        let (initial_bindings, initial_declarations) =
+            PlaceState::undefined(ScopedReachabilityConstraintId::ALWAYS_TRUE).into_parts();
+        let initial_bindings_id = place_state_interner.intern_bindings(&initial_bindings);
+        let initial_declarations_id =
+            place_state_interner.intern_declarations(initial_declarations.clone());
         // These fields are manually interned because they have a statistically high duplication rate (>50%).
         let definitions_by_definition = Self::intern_definitions_by_definition(
             self.definitions_by_definition,
+            &initial_bindings,
+            &initial_declarations,
             &mut place_state_interner,
         );
         let bindings_by_use =
@@ -2583,6 +2601,13 @@ impl<'db> UseDefMapBuilder<'db> {
                 &mut self.reachability_constraints,
             );
         }
+        // Keep default entries while building so they remain barriers between non-contiguous
+        // ranges with the same metadata. Once construction is complete, absence represents the
+        // default of reachable code outside a `TYPE_CHECKING` block.
+        self.range_reachability.retain(|(_, info)| {
+            info.reachability != ScopedReachabilityConstraintId::ALWAYS_TRUE
+                || info.in_type_checking_block
+        });
         for &(_, RangeInfo { reachability, .. }) in &self.range_reachability {
             self.reachability_constraints.mark_used(reachability);
         }
@@ -2634,6 +2659,10 @@ impl<'db> UseDefMapBuilder<'db> {
             range_reachability: self.range_reachability.into_boxed_slice(),
             symbol_states,
             definitions_by_definition,
+            initial_definitions_at_definition: DefinitionsAtDefinition {
+                bindings: initial_bindings_id,
+                declarations: Some(initial_declarations_id),
+            },
             extra,
             end_of_scope_reachability: self.reachability,
         }
@@ -2660,6 +2689,8 @@ impl<'db> UseDefMapBuilder<'db> {
             Definition<'db>,
             DefinitionsAtDefinition<Bindings, Declarations>,
         >,
+        initial_bindings: &Bindings,
+        initial_declarations: &Declarations,
         place_state_interner: &mut PlaceStateInterner,
     ) -> FrozenMap<
         Definition<'db>,
@@ -2681,6 +2712,14 @@ impl<'db> UseDefMapBuilder<'db> {
             },
         ) in definitions_by_definition
         {
+            if bindings == *initial_bindings
+                && declarations
+                    .as_ref()
+                    .is_none_or(|declarations| declarations == initial_declarations)
+            {
+                continue;
+            }
+
             let bindings = place_state_interner.intern_bindings(&bindings);
             let declarations = declarations
                 .map(|declarations| place_state_interner.intern_declarations(declarations));
@@ -2777,5 +2816,40 @@ impl<'db> UseDefMapBuilder<'db> {
         }
 
         interned_ids_by_snapshot
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ruff_text_size::TextRange;
+
+    use super::UseDefMapBuilder;
+    use crate::reachability_constraints::ScopedReachabilityConstraintId;
+
+    #[test]
+    fn omits_default_range_reachability_without_merging_across_it() {
+        let mut builder = UseDefMapBuilder::new(false);
+
+        builder.reachability = ScopedReachabilityConstraintId::ALWAYS_FALSE;
+        builder.record_range_reachability(TextRange::new(0.into(), 1.into()), false);
+        builder.reachability = ScopedReachabilityConstraintId::ALWAYS_TRUE;
+        builder.record_range_reachability(TextRange::new(1.into(), 2.into()), false);
+        builder.reachability = ScopedReachabilityConstraintId::ALWAYS_FALSE;
+        builder.record_range_reachability(TextRange::new(2.into(), 3.into()), false);
+
+        let map = Box::new(builder).finish();
+        assert_eq!(
+            map.range_reachability().collect::<Vec<_>>(),
+            [
+                (
+                    TextRange::new(0.into(), 1.into()),
+                    ScopedReachabilityConstraintId::ALWAYS_FALSE,
+                ),
+                (
+                    TextRange::new(2.into(), 3.into()),
+                    ScopedReachabilityConstraintId::ALWAYS_FALSE,
+                ),
+            ]
+        );
     }
 }
